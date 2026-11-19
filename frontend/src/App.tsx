@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Activity, Radio, Shield, Key, RefreshCw, Send, CheckCircle2, 
-  AlertTriangle, XCircle, Clock, ChevronRight, LogOut, Plus, Trash2, Copy, Check
+  AlertTriangle, XCircle, Clock, ChevronRight, LogOut, Plus, Trash2, Copy, Check,
+  RotateCcw, Zap, Wifi, WifiOff
 } from 'lucide-react';
 import { api } from './services/api';
 import { AuthResponse, StatsResponse, WebhookEndpoint, ApiKey, CreatedApiKey, Delivery } from './types';
@@ -12,7 +13,8 @@ export default function App() {
     return saved ? JSON.parse(saved) : null;
   });
 
-  const [activeTab, setActiveTab] = useState<'overview' | 'endpoints' | 'logs' | 'apikeys'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'endpoints' | 'logs' | 'dlq' | 'apikeys'>('overview');
+  const [sseConnected, setSseConnected] = useState(false);
 
   // Auth form states
   const [isRegister, setIsRegister] = useState(false);
@@ -26,8 +28,8 @@ export default function App() {
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [endpoints, setEndpoints] = useState<WebhookEndpoint[]>([]);
   const [deliveries, setDeliveries] = useState<Delivery[]>([]);
+  const [dlqDeliveries, setDlqDeliveries] = useState<Delivery[]>([]);
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
-  const [loading, setLoading] = useState(false);
 
   // Modal / Drawer states
   const [selectedDelivery, setSelectedDelivery] = useState<Delivery | null>(null);
@@ -40,6 +42,7 @@ export default function App() {
   const [newUrl, setNewUrl] = useState('https://httpbin.org/post');
   const [newDesc, setNewDesc] = useState('');
   const [newEventTypes, setNewEventTypes] = useState('order.created, payment.succeeded');
+  const [newRateLimit, setNewRateLimit] = useState(100);
   const [newTimeout, setNewTimeout] = useState(5000);
 
   // New key form
@@ -51,12 +54,72 @@ export default function App() {
   const [testIdempotency, setTestIdempotency] = useState('');
   const [testStatus, setTestStatus] = useState<string | null>(null);
 
+  // Polling fallback + initial fetch
   useEffect(() => {
     if (user) {
       loadAllData();
-      const interval = setInterval(loadAllData, 4000);
+      const interval = setInterval(loadAllData, 5000);
       return () => clearInterval(interval);
     }
+  }, [user]);
+
+  // Real-Time Server-Sent Events (SSE) stream listener
+  useEffect(() => {
+    if (!user) return;
+
+    let eventSource: EventSource | null = null;
+    try {
+      eventSource = new EventSource(api.getDeliveryStreamUrl());
+
+      eventSource.onopen = () => {
+        setSseConnected(true);
+      };
+
+      eventSource.addEventListener('CONNECTED', () => {
+        setSseConnected(true);
+      });
+
+      eventSource.addEventListener('DELIVERY_UPDATE', (e) => {
+        try {
+          const updated: Delivery = JSON.parse(e.data);
+          setDeliveries(prev => {
+            const idx = prev.findIndex(d => d.id === updated.id);
+            if (idx >= 0) {
+              const copy = [...prev];
+              copy[idx] = updated;
+              return copy;
+            } else {
+              return [updated, ...prev];
+            }
+          });
+
+          // If updated item is in selected modal, refresh it
+          setSelectedDelivery(current => (current && current.id === updated.id ? updated : current));
+
+          // Also refresh DLQ if it became or was dead-letter
+          if (updated.status === 'DEAD_LETTER') {
+            loadDlqData();
+          }
+
+          // Refresh stats
+          api.getStats().then(setStats).catch(() => {});
+        } catch (err) {
+          console.error('SSE delivery update parse error:', err);
+        }
+      });
+
+      eventSource.onerror = () => {
+        setSseConnected(false);
+      };
+    } catch (err) {
+      setSseConnected(false);
+    }
+
+    return () => {
+      if (eventSource) {
+        eventSource.close();
+      }
+    };
   }, [user]);
 
   async function loadAllData() {
@@ -71,10 +134,23 @@ export default function App() {
       setEndpoints(e);
       setDeliveries(d.content || []);
       setApiKeys(k);
+
+      if (activeTab === 'dlq') {
+        await loadDlqData();
+      }
     } catch (err: any) {
       if (err.message === 'Unauthorized') {
         setUser(null);
       }
+    }
+  }
+
+  async function loadDlqData() {
+    try {
+      const res = await api.getDlq(0, 50);
+      setDlqDeliveries(res.content || []);
+    } catch (err) {
+      console.error('Failed to load DLQ:', err);
     }
   }
 
@@ -113,7 +189,8 @@ export default function App() {
         url: newUrl,
         description: newDesc,
         eventTypes: types.length > 0 ? types : ['*'],
-        timeoutMs: newTimeout
+        rateLimit: newRateLimit > 0 ? newRateLimit : 100,
+        timeoutMs: newTimeout > 0 ? newTimeout : 5000
       });
       setShowEndpointModal(false);
       setNewUrl('');
@@ -162,6 +239,17 @@ export default function App() {
     }
   }
 
+  async function handleBulkReplayDlq() {
+    try {
+      const res = await api.bulkReplayDlq();
+      alert(`Success: ${res.message}`);
+      await loadAllData();
+      await loadDlqData();
+    } catch (err: any) {
+      alert('DLQ Replay failed: ' + err.message);
+    }
+  }
+
   async function handleTestIngest(e: React.FormEvent) {
     e.preventDefault();
     setTestStatus('Dispatching...');
@@ -172,7 +260,7 @@ export default function App() {
         payload: parsed,
         idempotencyKey: testIdempotency || undefined
       });
-      setTestStatus(`Accepted! Event ID: ${res.eventId} (${res.deliveriesScheduled} deliveries scheduled)`);
+      setTestStatus(`Accepted! Event ID: ${res.eventId} (${res.deliveriesScheduled} deliveries scheduled - Status: ${res.status})`);
       await loadAllData();
     } catch (err: any) {
       setTestStatus('Error: ' + err.message);
@@ -285,6 +373,7 @@ export default function App() {
               { id: 'overview', label: 'Overview', icon: Activity },
               { id: 'endpoints', label: 'Endpoints', icon: Radio },
               { id: 'logs', label: 'Delivery Logs', icon: Clock },
+              { id: 'dlq', label: 'Dead-Letter Queue', icon: AlertTriangle, count: stats?.deadLetter },
               { id: 'apikeys', label: 'API Keys', icon: Key },
             ].map(tab => {
               const Icon = tab.icon;
@@ -292,7 +381,12 @@ export default function App() {
               return (
                 <button
                   key={tab.id}
-                  onClick={() => setActiveTab(tab.id as any)}
+                  onClick={() => {
+                    setActiveTab(tab.id as any);
+                    if (tab.id === 'dlq') {
+                      loadDlqData();
+                    }
+                  }}
                   style={{
                     display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.4rem 0.8rem',
                     borderRadius: '6px', border: 'none', cursor: 'pointer', fontSize: '0.85rem', fontWeight: 600,
@@ -302,13 +396,40 @@ export default function App() {
                 >
                   <Icon size={16} />
                   {tab.label}
+                  {tab.count !== undefined && tab.count > 0 && (
+                    <span style={{ background: '#ef4444', color: '#fff', fontSize: '0.7rem', padding: '1px 6px', borderRadius: '10px', marginLeft: '4px' }}>
+                      {tab.count}
+                    </span>
+                  )}
                 </button>
               );
             })}
           </nav>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem' }}>
+          {/* Live SSE Badge */}
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: '0.4rem',
+            padding: '4px 10px', borderRadius: '20px',
+            fontSize: '0.75rem', fontWeight: 600,
+            background: sseConnected ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)',
+            border: sseConnected ? '1px solid rgba(16, 185, 129, 0.3)' : '1px solid rgba(239, 68, 68, 0.3)',
+            color: sseConnected ? '#34d399' : '#f87171'
+          }}>
+            {sseConnected ? (
+              <>
+                <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#10b981', display: 'inline-block', boxShadow: '0 0 8px #10b981' }} />
+                <span>Live SSE Connected</span>
+              </>
+            ) : (
+              <>
+                <WifiOff size={12} />
+                <span>Reconnecting SSE</span>
+              </>
+            )}
+          </div>
+
           <div style={{ textAlign: 'right' }}>
             <div style={{ fontSize: '0.85rem', fontWeight: 600, color: '#f8fafc' }}>{user.organizationName}</div>
             <div style={{ fontSize: '0.75rem', color: '#64748b' }}>{user.email}</div>
@@ -347,8 +468,14 @@ export default function App() {
                 <div style={{ fontSize: '0.8rem', color: '#fbbf24', fontWeight: 600 }}>Retrying</div>
                 <div style={{ fontSize: '2rem', fontWeight: 700, color: '#fbbf24', marginTop: '0.25rem' }}>{stats?.retrying ?? 0}</div>
               </div>
-              <div style={{ background: '#131b2e', border: '1px solid rgba(239, 68, 68, 0.3)', padding: '1.25rem', borderRadius: '8px' }}>
-                <div style={{ fontSize: '0.8rem', color: '#f87171', fontWeight: 600 }}>Dead-Letter (Exhausted)</div>
+              <div 
+                onClick={() => { setActiveTab('dlq'); loadDlqData(); }}
+                style={{ background: '#131b2e', border: '1px solid rgba(239, 68, 68, 0.3)', padding: '1.25rem', borderRadius: '8px', cursor: 'pointer', transition: 'border-color 0.2s' }}
+              >
+                <div style={{ fontSize: '0.8rem', color: '#f87171', fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span>Dead-Letter (Exhausted)</span>
+                  <ChevronRight size={14} />
+                </div>
                 <div style={{ fontSize: '2rem', fontWeight: 700, color: '#f87171', marginTop: '0.25rem' }}>{stats?.deadLetter ?? 0}</div>
               </div>
             </div>
@@ -358,7 +485,7 @@ export default function App() {
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
                 <div>
                   <h3 style={{ fontSize: '1rem', fontWeight: 700, color: '#fff' }}>Test Event Ingestion</h3>
-                  <p style={{ fontSize: '0.8rem', color: '#94a3b8' }}>Publish a mock webhook event to trigger your registered endpoints.</p>
+                  <p style={{ fontSize: '0.8rem', color: '#94a3b8' }}>Publish a mock webhook event to trigger your registered endpoints with idempotency protection.</p>
                 </div>
                 <button
                   onClick={loadAllData}
@@ -389,6 +516,9 @@ export default function App() {
                       placeholder="e.g. idem_test_001"
                       style={{ width: '100%', padding: '0.5rem', background: '#0b0f19', border: '1px solid #334155', borderRadius: '6px', color: '#fff', fontSize: '0.85rem' }}
                     />
+                    <div style={{ fontSize: '0.7rem', color: '#64748b', marginTop: '2px' }}>
+                      Duplicate keys return existing dispatch without duplicating deliveries.
+                    </div>
                   </div>
                   <button
                     type="submit"
@@ -423,7 +553,7 @@ export default function App() {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
                 <h2 style={{ fontSize: '1.25rem', fontWeight: 700, color: '#fff' }}>Webhook Endpoints</h2>
-                <p style={{ fontSize: '0.85rem', color: '#94a3b8' }}>Target destination URLs subscribed to receive your event dispatches.</p>
+                <p style={{ fontSize: '0.85rem', color: '#94a3b8' }}>Target destination URLs configured with rate limiting, timeouts, and HMAC-SHA256 secrets.</p>
               </div>
               <button
                 onClick={() => setShowEndpointModal(true)}
@@ -449,15 +579,18 @@ export default function App() {
                         </span>
                       </div>
                       {e.description && <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>{e.description}</div>}
-                      <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.25rem', alignItems: 'center' }}>
+                      <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.25rem', alignItems: 'center', flexWrap: 'wrap' }}>
                         <span style={{ fontSize: '0.75rem', color: '#64748b' }}>Events:</span>
                         {e.eventTypes.map(t => (
                           <span key={t} style={{ fontSize: '0.75rem', background: '#1e293b', padding: '2px 6px', borderRadius: '4px', color: '#cbd5e1' }}>{t}</span>
                         ))}
-                        <span style={{ fontSize: '0.75rem', color: '#64748b', marginLeft: '0.5rem' }}>Timeout: {e.timeoutMs}ms</span>
+                        <span style={{ fontSize: '0.75rem', color: '#818cf8', background: 'rgba(99,102,241,0.1)', padding: '2px 6px', borderRadius: '4px' }}>
+                          Rate Limit: {e.rateLimit || 100} req/s
+                        </span>
+                        <span style={{ fontSize: '0.75rem', color: '#64748b' }}>Timeout: {e.timeoutMs}ms</span>
                       </div>
                       <div style={{ fontSize: '0.75rem', color: '#64748b', display: 'flex', alignItems: 'center', gap: '0.4rem', marginTop: '0.25rem' }}>
-                        <span>Secret:</span>
+                        <span>HMAC Secret:</span>
                         <code style={{ color: '#a5f3fc', background: '#0b0f19', padding: '2px 6px', borderRadius: '4px' }}>{e.secretToken}</code>
                         <button
                           onClick={() => copyToClipboard(e.secretToken)}
@@ -555,7 +688,97 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 4: API KEYS */}
+        {/* TAB 4: DEAD-LETTER QUEUE (DLQ) */}
+        {activeTab === 'dlq' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <h2 style={{ fontSize: '1.25rem', fontWeight: 700, color: '#f87171', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <AlertTriangle size={20} /> Dead-Letter Queue (DLQ)
+                </h2>
+                <p style={{ fontSize: '0.85rem', color: '#94a3b8' }}>
+                  Deliveries that permanently failed all configured retries. Inspect root-cause errors and trigger bulk replay.
+                </p>
+              </div>
+              <div style={{ display: 'flex', gap: '0.75rem' }}>
+                <button
+                  onClick={loadDlqData}
+                  style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.4rem 0.8rem', background: '#1e293b', border: '1px solid #334155', borderRadius: '6px', color: '#94a3b8', cursor: 'pointer', fontSize: '0.8rem' }}
+                >
+                  <RefreshCw size={14} /> Refresh
+                </button>
+                <button
+                  onClick={handleBulkReplayDlq}
+                  disabled={dlqDeliveries.length === 0}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.5rem 1rem',
+                    background: dlqDeliveries.length > 0 ? '#dc2626' : '#334155',
+                    border: 'none', borderRadius: '6px', color: '#fff', fontWeight: 600,
+                    cursor: dlqDeliveries.length > 0 ? 'pointer' : 'not-allowed'
+                  }}
+                >
+                  <RotateCcw size={16} /> Replay All DLQ ({dlqDeliveries.length})
+                </button>
+              </div>
+            </div>
+
+            <div style={{ background: '#131b2e', border: '1px solid #1e293b', borderRadius: '8px', overflow: 'hidden' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.85rem' }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid #1e293b', background: '#0f172a', color: '#94a3b8' }}>
+                    <th style={{ padding: '0.75rem 1rem' }}>Event Type</th>
+                    <th style={{ padding: '0.75rem 1rem' }}>Target Endpoint</th>
+                    <th style={{ padding: '0.75rem 1rem' }}>Attempts</th>
+                    <th style={{ padding: '0.75rem 1rem' }}>Final Error</th>
+                    <th style={{ padding: '0.75rem 1rem' }}>Created At</th>
+                    <th style={{ padding: '0.75rem 1rem', textAlign: 'right' }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dlqDeliveries.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} style={{ padding: '3rem', textAlign: 'center', color: '#64748b' }}>
+                        <CheckCircle2 size={32} color="#10b981" style={{ margin: '0 auto 0.5rem auto' }} />
+                        <div>No dead-lettered webhooks! All deliveries are healthy or successfully delivered.</div>
+                      </td>
+                    </tr>
+                  ) : (
+                    dlqDeliveries.map(d => {
+                      const latestAttempt = d.attempts && d.attempts.length > 0 ? d.attempts[d.attempts.length - 1] : null;
+                      return (
+                        <tr 
+                          key={d.id}
+                          onClick={() => setSelectedDelivery(d)}
+                          style={{ borderBottom: '1px solid #1e293b', cursor: 'pointer', transition: 'background 0.15s' }}
+                          onMouseEnter={e => (e.currentTarget.style.background = '#1a233a')}
+                          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                        >
+                          <td style={{ padding: '0.75rem 1rem', fontWeight: 600, color: '#f8fafc' }}>{d.eventType}</td>
+                          <td style={{ padding: '0.75rem 1rem', color: '#94a3b8', maxWidth: '240px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.endpointUrl}</td>
+                          <td style={{ padding: '0.75rem 1rem', color: '#f87171', fontWeight: 700 }}>{d.attemptCount}/{d.maxAttempts}</td>
+                          <td style={{ padding: '0.75rem 1rem', color: '#fca5a5', maxWidth: '250px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {latestAttempt?.errorMessage || (latestAttempt?.responseStatusCode ? `HTTP ${latestAttempt.responseStatusCode}` : 'Exhausted')}
+                          </td>
+                          <td style={{ padding: '0.75rem 1rem', color: '#64748b', fontSize: '0.8rem' }}>{new Date(d.createdAt).toLocaleString()}</td>
+                          <td style={{ padding: '0.75rem 1rem', textAlign: 'right' }}>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); handleRetryDelivery(d.id); }}
+                              style={{ padding: '4px 10px', background: '#dc2626', border: 'none', borderRadius: '4px', color: '#fff', fontSize: '0.75rem', fontWeight: 600, cursor: 'pointer' }}
+                            >
+                              Replay Now
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* TAB 5: API KEYS */}
         {activeTab === 'apikeys' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -710,14 +933,27 @@ export default function App() {
                   style={{ width: '100%', padding: '0.5rem', background: '#0b0f19', border: '1px solid #334155', borderRadius: '6px', color: '#fff', fontSize: '0.85rem' }}
                 />
               </div>
-              <div>
-                <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#cbd5e1', marginBottom: '4px' }}>Timeout (ms)</label>
-                <input
-                  type="number"
-                  value={newTimeout}
-                  onChange={e => setNewTimeout(Number(e.target.value))}
-                  style={{ width: '100%', padding: '0.5rem', background: '#0b0f19', border: '1px solid #334155', borderRadius: '6px', color: '#fff', fontSize: '0.85rem' }}
-                />
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#cbd5e1', marginBottom: '4px' }}>Rate Limit (req/sec)</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={newRateLimit}
+                    onChange={e => setNewRateLimit(Number(e.target.value))}
+                    style={{ width: '100%', padding: '0.5rem', background: '#0b0f19', border: '1px solid #334155', borderRadius: '6px', color: '#fff', fontSize: '0.85rem' }}
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#cbd5e1', marginBottom: '4px' }}>Timeout (ms)</label>
+                  <input
+                    type="number"
+                    min="500"
+                    value={newTimeout}
+                    onChange={e => setNewTimeout(Number(e.target.value))}
+                    style={{ width: '100%', padding: '0.5rem', background: '#0b0f19', border: '1px solid #334155', borderRadius: '6px', color: '#fff', fontSize: '0.85rem' }}
+                  />
+                </div>
               </div>
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginTop: '1rem' }}>
                 <button

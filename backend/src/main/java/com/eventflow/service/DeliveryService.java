@@ -57,6 +57,36 @@ public class DeliveryService {
     }
 
     @Transactional(readOnly = true)
+    public Page<DeliveryDto.DetailResponse> listDlqDeliveries(UUID organizationId, Pageable pageable) {
+        return deliveryRepository.findByEndpointOrganizationIdAndStatusOrderByCreatedAtDesc(
+                organizationId, DeliveryStatus.DEAD_LETTER, pageable)
+                .map(this::mapToDetail);
+    }
+
+    @Transactional
+    public int bulkReplayDlq(UUID organizationId, List<UUID> deliveryIds) {
+        List<EventDelivery> dlqItems;
+        if (deliveryIds == null || deliveryIds.isEmpty()) {
+            dlqItems = deliveryRepository.findByEndpointOrganizationIdAndStatus(organizationId, DeliveryStatus.DEAD_LETTER);
+        } else {
+            dlqItems = deliveryRepository.findByIdInAndEndpointOrganizationId(deliveryIds, organizationId).stream()
+                    .filter(d -> d.getStatus() == DeliveryStatus.DEAD_LETTER)
+                    .toList();
+        }
+
+        Instant now = Instant.now();
+        for (EventDelivery delivery : dlqItems) {
+            delivery.setStatus(DeliveryStatus.PENDING);
+            delivery.setAttemptCount(0);
+            delivery.setNextRetryAt(now);
+            delivery.setLockedAt(null);
+            delivery.setLockedBy(null);
+        }
+        deliveryRepository.saveAll(dlqItems);
+        return dlqItems.size();
+    }
+
+    @Transactional(readOnly = true)
     public DeliveryDto.StatsResponse getStats(UUID organizationId) {
         long delivered = deliveryRepository.countByEndpointOrganizationIdAndStatus(organizationId, DeliveryStatus.DELIVERED);
         long pending = deliveryRepository.countByEndpointOrganizationIdAndStatus(organizationId, DeliveryStatus.PENDING);
@@ -78,7 +108,7 @@ public class DeliveryService {
         return delivery;
     }
 
-    private DeliveryDto.DetailResponse mapToDetail(EventDelivery d) {
+    public DeliveryDto.DetailResponse mapToDetail(EventDelivery d) {
         List<DeliveryAttempt> attempts = attemptRepository.findByDeliveryIdOrderByAttemptNumberAsc(d.getId());
         List<DeliveryDto.AttemptResponse> attemptDtos = attempts.stream()
                 .map(a -> new DeliveryDto.AttemptResponse(

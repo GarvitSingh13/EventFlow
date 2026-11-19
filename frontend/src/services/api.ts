@@ -76,6 +76,28 @@ export const api = {
     return handleResponse<Delivery>(res);
   },
 
+  // Dead-Letter Queue (DLQ)
+  async getDlq(page = 0, size = 20): Promise<PageResponse<Delivery>> {
+    const res = await fetch(`${API_BASE}/deliveries/dlq?page=${page}&size=${size}`, {
+      headers: getAuthHeaders(),
+    });
+    return handleResponse<PageResponse<Delivery>>(res);
+  },
+
+  async bulkReplayDlq(deliveryIds?: string[]): Promise<{ replayedCount: number; message: string }> {
+    const res = await fetch(`${API_BASE}/deliveries/dlq/replay`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(deliveryIds && deliveryIds.length > 0 ? { deliveryIds } : {}),
+    });
+    return handleResponse<{ replayedCount: number; message: string }>(res);
+  },
+
+  getDeliveryStreamUrl(): string {
+    const token = localStorage.getItem('eventflow_token') || '';
+    return `${API_BASE}/deliveries/stream?token=${encodeURIComponent(token)}`;
+  },
+
   // Endpoints
   async getEndpoints(): Promise<WebhookEndpoint[]> {
     const res = await fetch(`${API_BASE}/endpoints`, {

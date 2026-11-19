@@ -21,6 +21,12 @@ public interface EventDeliveryRepository extends JpaRepository<EventDelivery, UU
 
     Page<EventDelivery> findByEndpointOrganizationIdOrderByCreatedAtDesc(UUID organizationId, Pageable pageable);
 
+    Page<EventDelivery> findByEndpointOrganizationIdAndStatusOrderByCreatedAtDesc(UUID organizationId, DeliveryStatus status, Pageable pageable);
+
+    List<EventDelivery> findByEndpointOrganizationIdAndStatus(UUID organizationId, DeliveryStatus status);
+
+    List<EventDelivery> findByIdInAndEndpointOrganizationId(List<UUID> ids, UUID organizationId);
+
     @Query(value = """
         SELECT * FROM event_deliveries
         WHERE status IN ('PENDING', 'RETRY_SCHEDULED')

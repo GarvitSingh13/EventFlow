@@ -15,7 +15,7 @@ class DeliveryWorkerServiceTest {
     @BeforeEach
     void setUp() {
         // Pure algorithmic test for jitter backoff calculation (no mocks required)
-        workerService = new DeliveryWorkerService(null, null, null);
+        workerService = new DeliveryWorkerService(null, null, null, null, null, null, null);
         ReflectionTestUtils.setField(workerService, "baseDelaySeconds", 2L);
         ReflectionTestUtils.setField(workerService, "maxDelaySeconds", 3600L);
     }

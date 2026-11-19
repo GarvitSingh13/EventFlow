@@ -39,10 +39,17 @@ public class SecurityAuthenticationFilter extends OncePerRequestFilter {
 
         String authHeader = request.getHeader("Authorization");
         String apiKeyHeader = request.getHeader("X-API-Key");
+        String tokenParam = request.getParameter("token");
 
-        // 1. Check for JWT Bearer token
+        // 1. Check for JWT Bearer token (Header or query param for SSE EventSource)
+        String token = null;
         if (authHeader != null && authHeader.startsWith("Bearer ")) {
-            String token = authHeader.substring(7);
+            token = authHeader.substring(7);
+        } else if (tokenParam != null && !tokenParam.isBlank()) {
+            token = tokenParam.trim();
+        }
+
+        if (token != null) {
             if (jwtService.isTokenValid(token)) {
                 Claims claims = jwtService.extractClaims(token);
                 UUID userId = UUID.fromString(claims.getSubject());

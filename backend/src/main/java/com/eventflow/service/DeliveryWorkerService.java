@@ -1,5 +1,6 @@
 package com.eventflow.service;
 
+import com.eventflow.dto.DeliveryDto;
 import com.eventflow.entity.DeliveryAttempt;
 import com.eventflow.entity.DeliveryStatus;
 import com.eventflow.entity.EventDelivery;
@@ -8,6 +9,7 @@ import com.eventflow.repository.DeliveryAttemptRepository;
 import com.eventflow.repository.EventDeliveryRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -22,8 +24,8 @@ import java.net.http.HttpTimeoutException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
-import java.util.Random;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 
 @Service
@@ -34,6 +36,10 @@ public class DeliveryWorkerService {
     private final EventDeliveryRepository deliveryRepository;
     private final DeliveryAttemptRepository attemptRepository;
     private final HmacService hmacService;
+    private final RateLimiterService rateLimiterService;
+    private final SseService sseService;
+    private final DeliveryService deliveryService;
+    private final ExecutorService taskExecutor;
     private final HttpClient httpClient;
 
     private final String workerId = "worker-" + UUID.randomUUID().toString().substring(0, 8);
@@ -50,10 +56,18 @@ public class DeliveryWorkerService {
     public DeliveryWorkerService(
             EventDeliveryRepository deliveryRepository,
             DeliveryAttemptRepository attemptRepository,
-            HmacService hmacService) {
+            HmacService hmacService,
+            RateLimiterService rateLimiterService,
+            SseService sseService,
+            DeliveryService deliveryService,
+            @Qualifier("deliveryTaskExecutor") ExecutorService taskExecutor) {
         this.deliveryRepository = deliveryRepository;
         this.attemptRepository = attemptRepository;
         this.hmacService = hmacService;
+        this.rateLimiterService = rateLimiterService;
+        this.sseService = sseService;
+        this.deliveryService = deliveryService;
+        this.taskExecutor = taskExecutor;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(5))
                 .followRedirects(HttpClient.Redirect.NORMAL)
@@ -87,17 +101,38 @@ public class DeliveryWorkerService {
         }
         deliveryRepository.saveAll(dueDeliveries);
 
-        // Process each locked delivery
+        // Submit each locked delivery to Virtual Threads for concurrent execution & rate limiting
         for (EventDelivery delivery : dueDeliveries) {
-            try {
-                executeDelivery(delivery);
-            } catch (Exception e) {
-                log.error("Error executing delivery " + delivery.getId(), e);
-            }
+            taskExecutor.submit(() -> {
+                try {
+                    processSingleDelivery(delivery);
+                } catch (Exception e) {
+                    log.error("Error executing delivery " + delivery.getId(), e);
+                }
+            });
         }
     }
 
-    private void executeDelivery(EventDelivery delivery) {
+    public void processSingleDelivery(EventDelivery delivery) {
+        WebhookEndpoint endpoint = delivery.getEndpoint();
+        int rateLimit = endpoint.getRateLimit() > 0 ? endpoint.getRateLimit() : 100;
+
+        // Apply Token Bucket rate limiting per endpoint
+        if (!rateLimiterService.tryAcquire(endpoint.getId(), rateLimit)) {
+            log.warn("Rate limit ({}/s) exceeded for endpoint [{}], deferring delivery [{}] by 500ms",
+                    rateLimit, endpoint.getId(), delivery.getId());
+            delivery.setStatus(DeliveryStatus.RETRY_SCHEDULED);
+            delivery.setNextRetryAt(Instant.now().plusMillis(500));
+            delivery.setLockedAt(null);
+            delivery.setLockedBy(null);
+            deliveryRepository.save(delivery);
+            return;
+        }
+
+        executeDelivery(delivery);
+    }
+
+    public void executeDelivery(EventDelivery delivery) {
         WebhookEndpoint endpoint = delivery.getEndpoint();
         String payload = delivery.getEvent().getPayload();
         long timestamp = Instant.now().getEpochSecond();
@@ -184,7 +219,15 @@ public class DeliveryWorkerService {
             }
         }
 
-        deliveryRepository.save(delivery);
+        EventDelivery savedDelivery = deliveryRepository.save(delivery);
+
+        // Real-Time SSE Broadcast to connected developers
+        try {
+            DeliveryDto.DetailResponse detailDto = deliveryService.mapToDetail(savedDelivery);
+            sseService.broadcastDeliveryUpdate(endpoint.getOrganization().getId(), detailDto);
+        } catch (Exception e) {
+            log.debug("Failed to broadcast SSE update: {}", e.getMessage());
+        }
     }
 
     /**

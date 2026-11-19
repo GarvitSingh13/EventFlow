@@ -29,9 +29,26 @@ public class EventController {
         summary = "Ingest an event for delivery to subscribed endpoints",
         security = { @SecurityRequirement(name = "apiKeyAuth"), @SecurityRequirement(name = "bearerAuth") }
     )
-    public ResponseEntity<EventDto.IngestResponse> ingestEvent(@Valid @RequestBody EventDto.IngestRequest request) {
+    public ResponseEntity<EventDto.IngestResponse> ingestEvent(
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKeyHeader,
+            @RequestHeader(value = "X-Idempotency-Key", required = false) String xIdempotencyKeyHeader,
+            @Valid @RequestBody EventDto.IngestRequest request) {
         UUID orgId = SecurityUtils.getCurrentOrganizationId();
-        EventDto.IngestResponse response = ingestionService.ingestEvent(orgId, request);
+
+        String effectiveKey = request.idempotencyKey();
+        if ((effectiveKey == null || effectiveKey.isBlank()) && idempotencyKeyHeader != null && !idempotencyKeyHeader.isBlank()) {
+            effectiveKey = idempotencyKeyHeader.trim();
+        } else if ((effectiveKey == null || effectiveKey.isBlank()) && xIdempotencyKeyHeader != null && !xIdempotencyKeyHeader.isBlank()) {
+            effectiveKey = xIdempotencyKeyHeader.trim();
+        }
+
+        EventDto.IngestRequest effectiveRequest = new EventDto.IngestRequest(
+                request.eventType(),
+                request.payload(),
+                effectiveKey
+        );
+
+        EventDto.IngestResponse response = ingestionService.ingestEvent(orgId, effectiveRequest);
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(response);
     }
 }
