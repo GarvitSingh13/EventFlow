@@ -1,0 +1,95 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": 1,
+  "title": "EventFlow — Webhook Delivery Engine Telemetry",
+  "tags": ["eventflow", "webhooks", "production"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "5s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Delivery Throughput (req/sec)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "rate(eventflow_deliveries_total[1m])",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Webhook Dispatch Latency Percentiles (p50, p95, p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "eventflow_deliveries_duration_seconds{quantile=\"0.5\"} * 1000",
+          "legendFormat": "p50 (ms)"
+        },
+        {
+          "expr": "eventflow_deliveries_duration_seconds{quantile=\"0.95\"} * 1000",
+          "legendFormat": "p95 (ms)"
+        },
+        {
+          "expr": "eventflow_deliveries_duration_seconds{quantile=\"0.99\"} * 1000",
+          "legendFormat": "p99 (ms)"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Dead-Letter Queue (DLQ) Exhaustion Rate",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "increase(eventflow_deliveries_dlq_total[5m])",
+          "legendFormat": "Exhausted"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Database Connection Pool (HikariCP Active / Max)",
+      "type": "gauge",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 8 },
+      "targets": [
+        {
+          "expr": "hikaricp_connections_active{pool=\"EventFlowHikariCP\"}",
+          "legendFormat": "Active Connections"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "JVM Heap Memory Saturation",
+      "type": "gauge",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum(jvm_memory_used_bytes{area=\"heap\"}) / sum(jvm_memory_max_bytes{area=\"heap\"}) * 100",
+          "legendFormat": "Heap %"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Delivery Worker Polling Rate (SKIP LOCKED)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 8 },
+      "targets": [
+        {
+          "expr": "rate(tasks_scheduled_execution_seconds_count{code_function=\"pollAndDispatchDeliveries\"}[1m])",
+          "legendFormat": "Batches/sec"
+        }
+      ]
+    }
+  ]
+}

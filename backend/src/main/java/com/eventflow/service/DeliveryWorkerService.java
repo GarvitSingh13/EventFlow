@@ -39,6 +39,7 @@ public class DeliveryWorkerService {
     private final RateLimiterService rateLimiterService;
     private final SseService sseService;
     private final DeliveryService deliveryService;
+    private final DeliveryMetricsService metricsService;
     private final ExecutorService taskExecutor;
     private final HttpClient httpClient;
 
@@ -60,6 +61,7 @@ public class DeliveryWorkerService {
             RateLimiterService rateLimiterService,
             SseService sseService,
             DeliveryService deliveryService,
+            DeliveryMetricsService metricsService,
             @Qualifier("deliveryTaskExecutor") ExecutorService taskExecutor) {
         this.deliveryRepository = deliveryRepository;
         this.attemptRepository = attemptRepository;
@@ -67,6 +69,7 @@ public class DeliveryWorkerService {
         this.rateLimiterService = rateLimiterService;
         this.sseService = sseService;
         this.deliveryService = deliveryService;
+        this.metricsService = metricsService;
         this.taskExecutor = taskExecutor;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(5))
@@ -202,9 +205,19 @@ public class DeliveryWorkerService {
 
         if (isSuccess) {
             delivery.setStatus(DeliveryStatus.DELIVERED);
+            if (metricsService != null) {
+                metricsService.recordSuccess(durationMs);
+            }
             log.info("Delivery [{}] SUCCEEDED on attempt {} (Status: {}, Latency: {}ms)",
                     delivery.getId(), nextAttemptNumber, statusCode, durationMs);
         } else {
+            if (metricsService != null) {
+                if (errorMessage != null && errorMessage.contains("Timed Out")) {
+                    metricsService.recordTimeout(durationMs);
+                } else {
+                    metricsService.recordFailure(durationMs);
+                }
+            }
             if (nextAttemptNumber < delivery.getMaxAttempts()) {
                 long backoffSeconds = calculateFullJitterDelay(nextAttemptNumber);
                 Instant nextRetry = Instant.now().plusSeconds(backoffSeconds);
@@ -214,6 +227,9 @@ public class DeliveryWorkerService {
                         delivery.getId(), nextAttemptNumber, statusCode, errorMessage, backoffSeconds, nextRetry);
             } else {
                 delivery.setStatus(DeliveryStatus.DEAD_LETTER);
+                if (metricsService != null) {
+                    metricsService.recordDeadLetter();
+                }
                 log.error("Delivery [{}] EXHAUSTED all {} attempts. Moved to DEAD_LETTER (Status: {}, Error: {})",
                         delivery.getId(), delivery.getMaxAttempts(), statusCode, errorMessage);
             }
