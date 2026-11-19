@@ -1,0 +1,71 @@
+server:
+  port: ${SERVER_PORT:8085}
+  shutdown: graceful
+
+spring:
+  application:
+    name: eventflow-backend
+
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5433}/${DB_NAME:eventflow}
+    username: ${DB_USER:eventflow}
+    password: ${DB_PASSWORD:eventflow_secret}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      idle-timeout: 300000
+      max-lifetime: 1200000
+      connection-timeout: 20000
+      pool-name: EventFlowHikariCP
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+        jdbc:
+          batch_size: 25
+          order_inserts: true
+          order_updates: true
+
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    locations: classpath:db/migration
+
+eventflow:
+  jwt:
+    # 256-bit base64 secret for HMAC-SHA256 signing
+    secret: ${JWT_SECRET:dGhpc19pc19hX3Zlcnlfc2VjdXJlX2FuZF9sb25nXzI1NmJpdF9qd3Rfc2VjcmV0X2tleV9mb3JfZXZlbnRmbG93XzIwMjQ=}
+    expiration-ms: 86400000 # 24 hours
+  worker:
+    polling-interval-ms: 2000 # poll every 2 seconds
+    batch-size: 50
+    default-timeout-ms: 5000
+    max-retries: 5
+    base-retry-delay-seconds: 2
+    max-retry-delay-seconds: 3600
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: alpha
