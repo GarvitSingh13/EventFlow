@@ -144,4 +144,4 @@ powershell -File .\mvnw.ps1 test
 ---
 
 ## 📜 License
-MIT License. Created by [Garvit Singh](https://github.com/GarvitSingh13).
+This project is licensed under the [MIT License](LICENSE). Created by [Garvit Singh](https://github.com/GarvitSingh13).
